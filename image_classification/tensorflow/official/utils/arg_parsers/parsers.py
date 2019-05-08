@@ -111,7 +111,8 @@ class BaseParser(argparse.ArgumentParser):
                train_epochs=True, epochs_between_evals=True,
                stop_threshold=True, batch_size=True,
                multi_gpu=False, num_gpu=True, hooks=True,
-               enable_lars=True, label_smoothing=True, weight_decay=True, fine_tune=True):
+               enable_lars=True, label_smoothing=True, weight_decay=True, 
+               fine_tune=True, warmup_epochs=True, base_lr=True, use_default_lr_policy=True):
     super(BaseParser, self).__init__(add_help=add_help)
 
     if data_dir:
@@ -131,11 +132,18 @@ class BaseParser(argparse.ArgumentParser):
 
     if train_epochs:
       self.add_argument(
-          "--train_epochs", "-te", type=int, default=1,
+          "--train_epochs", "-te", type=int, default=90,
           help="[default: %(default)s] The number of epochs used to train.",
           metavar="<TE>"
       )
-
+    
+    if warmup_epochs:
+      self.add_argument(
+          "--warmup_epochs", "-we", type=int, default=5,
+          help="[default: %(default)s] The number of warmup epochs.",
+          metavar="<WE>"
+      )
+    
     if epochs_between_evals:
       self.add_argument(
           "--epochs_between_evals", "-ebe", type=int, default=1,
@@ -153,6 +161,13 @@ class BaseParser(argparse.ArgumentParser):
           metavar="<ST>"
       )
 
+    if base_lr:
+      self.add_argument(
+         "--base_lr", "-blr", type=float, default=0.1,
+         help='[default: %(default)s] Value of base learning rate.',
+         metavar="<BLR>"
+      )        
+    
     if batch_size:
       self.add_argument(
           "--batch_size", "-bs", type=int, default=32,
@@ -160,7 +175,13 @@ class BaseParser(argparse.ArgumentParser):
                "evaluation.",
           metavar="<BS>"
       )
-
+    
+    if use_default_lr_policy:
+      self.add_argument(
+         "--use_default_lr_policy", "-dlr", action='store_true',
+         help='[default: %(default)s] Use default learning rate policy parameters.'
+      )
+    
     if enable_lars:
       self.add_argument(
          "--enable_lars", "-el", action='store_true',

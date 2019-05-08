@@ -56,11 +56,11 @@ def get_filenames(is_training, data_dir):
   """Return filenames for dataset."""
   if is_training:
     return [
-        os.path.join(data_dir, 'train-%05d-of-01024' % i)
+        os.path.join(data_dir, 'train-%05d-of-01024' % (i+1))
         for i in range(_NUM_TRAIN_FILES)]
   else:
     return [
-        os.path.join(data_dir, 'validation-%05d-of-00128' % i)
+        os.path.join(data_dir, 'validation-%05d-of-00128' % (i+1))
         for i in range(128)]
 
 
@@ -286,12 +286,14 @@ def imagenet_model_fn(features, labels, mode, params):
     base_lr = .1
   else:
     base_lr = .128
+
   global_batch_size = params['batch_size'] * hvd.size()
   learning_rate_fn = resnet_run_loop.learning_rate_with_decay(
       batch_size=global_batch_size, batch_denom=256,
       num_images=_NUM_IMAGES['train'], boundary_epochs=[30, 60, 80, 90],
-      decay_rates=[1, 0.1, 0.01, 0.001, 1e-4], base_lr=_BASE_LR,
-      enable_lars=params['enable_lars'])
+      decay_rates=[1, 0.1, 0.01, 0.001, 1e-4], train_epochs=params['train_epochs'],
+      warmup_epochs=params['warmup_epochs'], base_lr=params['base_lr'],
+      enable_lars=params['enable_lars'], use_default_lr_policy=params['use_default_lr_policy'])
 
   return resnet_run_loop.resnet_model_fn(
       features=features,

@@ -135,7 +135,8 @@ def get_synth_input_fn(height, width, num_channels, num_classes):
 ################################################################################
 def learning_rate_with_decay(
     batch_size, batch_denom, num_images, boundary_epochs, decay_rates,
-    base_lr=0.1, enable_lars=False):
+    train_epochs=90, warmup_epochs=5, base_lr=0.1, enable_lars=False, 
+    use_default_lr_policy=True):
   """Get a learning rate that decays step-wise as training progresses.
 
   Args:
@@ -165,7 +166,7 @@ def learning_rate_with_decay(
 
   def learning_rate_fn(global_step):
     lr = tf.train.piecewise_constant(global_step, boundaries, vals)
-    warmup_steps = int(batches_per_epoch * 5)
+    warmup_steps = int(batches_per_epoch * warmup_epochs)
     warmup_lr = (
         initial_learning_rate * tf.cast(global_step, tf.float32) / tf.cast(
         warmup_steps, tf.float32))
@@ -187,18 +188,22 @@ def learning_rate_with_decay(
     """
 
     # Learning rate schedule for LARS polynomial schedule
-    if batch_size < 8192:
-      plr = 5.0
-      w_epochs = 5
-    elif batch_size < 16384:
-      plr = 10.0
-      w_epochs = 5
-    elif batch_size < 32768:
-      plr = 25.0
-      w_epochs = 5
+    if use_default_lr_policy: 
+        if batch_size < 8192:
+          plr = 5.0
+          w_epochs = 5
+        elif batch_size < 16384:
+          plr = 10.0
+          w_epochs = 5
+        elif batch_size < 32768:
+          plr = 25.0
+          w_epochs = 5
+        else:
+          plr = 32.0
+          w_epochs = 14
     else:
-      plr = 32.0
-      w_epochs = 14
+        plr = base_lr
+        w_epochs = warmup_epochs
 
     w_steps = int(w_epochs * batches_per_epoch)
     wrate = (plr * tf.cast(global_step, tf.float32) / tf.cast(
@@ -375,6 +380,7 @@ def resnet_model_fn(features, labels, mode, model_class,
       # back to the correct scale before passing them to the optimizer.
       unscaled_grad_vars = [(grad / loss_scale, var)
                             for grad, var in scaled_grad_vars]
+
       minimize_op = optimizer.apply_gradients(unscaled_grad_vars, global_step)
     else:
       minimize_op = optimizer.minimize(loss, global_step)
@@ -501,7 +507,11 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
           'label_smoothing': flags.label_smoothing,
           'enable_lars': flags.enable_lars,
           'weight_decay': flags.weight_decay,
-          'fine_tune': flags.fine_tune
+          'fine_tune': flags.fine_tune,
+          'train_epochs': flags.train_epochs,
+          'warmup_epochs': flags.warmup_epochs,
+          'base_lr': flags.base_lr,
+          'use_default_lr_policy': flags.use_default_lr_policy
       })
 
   if benchmark_log_dir is not None:
