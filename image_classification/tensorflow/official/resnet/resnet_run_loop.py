@@ -481,6 +481,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   mlperf_log.resnet_print(key=mlperf_log.RUN_SET_RANDOM_SEED, value=seed)
   run_config = tf.estimator.RunConfig(train_distribute=distribution,
                                       session_config=session_config,
+                                      save_checkpoints_secs = 45*60, 
                                       tf_random_seed=seed)
 
   mlperf_log.resnet_print(key=mlperf_log.INPUT_BATCH_SIZE,
