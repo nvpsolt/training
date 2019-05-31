@@ -30,6 +30,12 @@ from official.resnet import imagenet_preprocessing
 from official.resnet import resnet_model
 from official.resnet import resnet_run_loop
 
+from nvidia import dali
+import nvidia.dali.ops as ops
+import nvidia.dali.types as types
+import nvidia.dali.plugin.tf as dali_tf
+from nvidia.dali.pipeline import Pipeline
+
 import horovod.tensorflow as hvd
 # Initialize Horovod
 hvd.init()
@@ -138,6 +144,7 @@ def parse_record(raw_record, is_training, dtype):
   """
   image_buffer, label = _parse_example_proto(raw_record)
 
+
   image = imagenet_preprocessing.preprocess_image(
       image_buffer=image_buffer,
       output_height=_DEFAULT_IMAGE_SIZE,
@@ -147,6 +154,247 @@ def parse_record(raw_record, is_training, dtype):
   image = tf.cast(image, dtype)
 
   return image, label
+
+########## DALI #######################################
+
+
+_mean_pixel = [255 * x for x in (0.485, 0.456, 0.406)]
+_std_pixel  = [255 * x for x in (0.229, 0.224, 0.225)]
+
+class HybridTrainPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, rec_path, idx_path,
+                 shard_id, num_shards, crop_shape, 
+                 min_random_area, max_random_area,
+                 min_random_aspect_ratio, max_random_aspect_ratio,
+                 nvjpeg_padding, prefetch_queue=3,
+                 seed=12,
+                 output_layout=types.NCHW, pad_output=True, dtype='float16',
+                 mlperf_print=True, use_roi_decode=False, cache_size=0):
+        super(HybridTrainPipe, self).__init__(
+                batch_size, num_threads, device_id, 
+                seed = seed + device_id, 
+                prefetch_queue_depth = prefetch_queue)
+
+        if cache_size > 0:
+            self.input = ops.MXNetReader(path = [rec_path], index_path=[idx_path],
+                                         random_shuffle=True, shard_id=shard_id, num_shards=num_shards,
+                                         stick_to_shard=True, lazy_init=True, skip_cached_images=True)
+        else:  # stick_to_shard might not exist in this version of DALI.
+            self.input = ops.MXNetReader(path = [rec_path], index_path=[idx_path],
+                                         random_shuffle=True, shard_id=shard_id, num_shards=num_shards)
+
+        if use_roi_decode and cache_size == 0:
+            self.decode = ops.nvJPEGDecoderRandomCrop(device = "mixed", output_type = types.RGB,
+                                                      device_memory_padding = nvjpeg_padding,
+                                                      host_memory_padding = nvjpeg_padding,
+                                                      random_area = [
+                                                          min_random_area,
+                                                          max_random_area],
+                                                      random_aspect_ratio = [
+                                                          min_random_aspect_ratio,
+                                                          max_random_aspect_ratio])
+            self.rrc = ops.Resize(device = "gpu", resize_x=crop_shape[0], resize_y=crop_shape[1])
+        else:
+            if cache_size > 0:
+                self.decode = ops.nvJPEGDecoder(device = "mixed", output_type = types.RGB,
+                                                device_memory_padding = nvjpeg_padding,
+                                                host_memory_padding = nvjpeg_padding,
+                                                cache_type='threshold',
+                                                cache_size=cache_size,
+                                                cache_threshold=0,
+                                                cache_debug=False)
+            else:
+                self.decode = ops.nvJPEGDecoder(device = "mixed", output_type = types.RGB,
+                                                device_memory_padding = nvjpeg_padding,
+                                                host_memory_padding = nvjpeg_padding)
+            
+            self.rrc = ops.RandomResizedCrop(device = "gpu",
+                                             random_area = [
+                                                 min_random_area,
+                                                 max_random_area],
+                                             random_aspect_ratio = [
+                                                 min_random_aspect_ratio,
+                                                 max_random_aspect_ratio],
+                                             size = crop_shape)
+
+        self.cmnp = ops.CropMirrorNormalize(device = "gpu",
+                                            output_dtype = types.FLOAT16 if dtype == 'float16' else types.FLOAT,
+                                            output_layout = output_layout,
+                                            crop = crop_shape,
+                                            pad_output = pad_output,
+                                            image_type = types.RGB,
+                                            mean = _mean_pixel,
+                                            std =  _std_pixel)
+        self.coin = ops.CoinFlip(probability = 0.5)
+
+        
+    def define_graph(self):
+        rng = self.coin()
+        self.jpegs, self.labels = self.input(name = "Reader")
+
+        images = self.decode(self.jpegs)
+        images = self.rrc(images)
+        output = self.cmnp(images, mirror = rng)
+        return (output, self.labels.gpu())
+
+
+
+class HybridValPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, rec_path, idx_path,
+                 shard_id, num_shards, crop_shape, 
+                 nvjpeg_padding, prefetch_queue=3,
+                 seed=12, resize_shp=None,
+                 output_layout=types.NCHW, pad_output=True, dtype='float16',
+                 mlperf_print=True, cache_size=0):
+
+        super(HybridValPipe, self).__init__(
+                batch_size, num_threads, device_id, 
+                seed = seed + device_id,
+                prefetch_queue_depth = prefetch_queue)
+
+        if cache_size > 0:
+            self.input = ops.MXNetReader(path = [rec_path], index_path=[idx_path],
+                                         random_shuffle=False, shard_id=shard_id, num_shards=num_shards,
+                                         stick_to_shard=True, lazy_init=True, skip_cached_images=True)
+        else:  # stick_to_shard might not exist in this version of DALI.
+            self.input = ops.MXNetReader(path = [rec_path], index_path=[idx_path],
+                                         random_shuffle=False, shard_id=shard_id, num_shards=num_shards)
+
+        if cache_size > 0:
+            self.decode = ops.nvJPEGDecoder(device = "mixed", output_type = types.RGB,
+                                            device_memory_padding = nvjpeg_padding,
+                                            host_memory_padding = nvjpeg_padding,
+                                            cache_type='threshold',
+                                            cache_size=cache_size,
+                                            cache_threshold=0,
+                                            cache_debug=False)
+        else:
+            self.decode = ops.nvJPEGDecoder(device = "mixed", output_type = types.RGB,
+                                            device_memory_padding = nvjpeg_padding,
+                                            host_memory_padding = nvjpeg_padding)
+
+        self.resize = ops.Resize(device = "gpu", resize_shorter=resize_shp) if resize_shp else None
+
+        self.cmnp = ops.CropMirrorNormalize(device = "gpu",
+                                            output_dtype = types.FLOAT16 if dtype == 'float16' else types.FLOAT,
+                                            output_layout = output_layout,
+                                            crop = crop_shape,
+                                            pad_output = pad_output,
+                                            image_type = types.RGB,
+                                            mean = _mean_pixel,
+                                            std =  _std_pixel)
+
+        
+    def define_graph(self):
+        self.jpegs, self.labels = self.input(name = "Reader")
+        images = self.decode(self.jpegs)
+        if self.resize:
+            images = self.resize(images)
+        output = self.cmnp(images)
+        return (output, self.labels.gpu())
+
+
+
+def build_input_pipeline(
+        data_train, data_train_idx, data_val, data_val_idx,
+        batch_size=128, target_shape=(224,224, 3), seed=1, is_training=True):
+    # resize is default base length of shorter edge for dataset;
+    # all images will be reshaped to this size
+    resize = 256 
+    # target shape is final shape of images pipelined to network;
+    # all images will be cropped to this size
+    #target_shape = tuple([int(l) for l in args.image_shape.split(',')])
+
+    pad_output = target_shape[0] == 4
+    #gpus = list(map(int, filter(None, args.gpus.split(',')))) # filter to not encount eventually empty strings
+    #batch_size = args.batch_size//len(gpus)
+
+    #mx_resnet_print(
+    #        key=mlperf_constants.MODEL_BN_SPAN,
+    #        val=batch_size)
+
+    num_threads = 3 #args.dali_threads
+
+    # the input_layout w.r.t. the model is the output_layout of the image pipeline
+    output_layout = types.NHWC #types.NHWC if args.input_layout == 'NHWC' else types.NCHW
+
+
+    data_paths = {}
+    data_paths["train_data_tmp"] = data_train
+    data_paths["train_idx_tmp"] = data_train_idx
+    data_paths["val_data_tmp"] = data_val
+    data_paths["val_idx_tmp"] = data_val_idx
+
+    if is_training:
+        pipe = HybridTrainPipe(batch_size      = batch_size,
+                                  num_threads     = num_threads,
+                                  device_id       = hvd.local_rank(),
+                                  rec_path       = data_paths["train_data_tmp"],
+                                  idx_path       = data_paths["train_idx_tmp"],
+                                  shard_id        = hvd.local_rank(),
+                                  num_shards      = hvd.size(),
+                                  crop_shape      = target_shape[:-1],
+                                  min_random_area = 0.05,
+                                  max_random_area = 1.0,
+                                  min_random_aspect_ratio = 3./4.,
+                                  max_random_aspect_ratio = 4./3.,
+                                  nvjpeg_padding  = 64 * 1024 * 1024,
+                                  prefetch_queue  = 2,
+                                  seed            = seed,
+                                  output_layout   = output_layout,
+                                  pad_output      = pad_output,
+                                  dtype           = 'float32',
+                                  mlperf_print    = True,
+                                  use_roi_decode  = 0,
+                                  cache_size      = 6144)
+
+    else:
+        pipe =  HybridValPipe(batch_size     = batch_size,
+                              num_threads    = num_threads,
+                              device_id      = hvd.local_rank(),
+                              rec_path       = data_paths["val_data_tmp"],
+                              idx_path       = data_paths["val_idx_tmp"],
+                              shard_id       = 0,
+                              num_shards     = 1,
+                              crop_shape     = target_shape[:-1],
+                              nvjpeg_padding = 64 * 1024 * 1024,
+                              prefetch_queue = 2,
+                              seed           = seed,
+                              resize_shp     = resize,
+                              output_layout  = output_layout,
+                              pad_output     = pad_output,
+                              dtype          = 'float32',
+                              mlperf_print   = True,
+                              cache_size     = 6144)
+    
+
+    return pipe
+
+
+
+class DALIPreprocessor(object):
+    def __init__(self,
+                 pipe,
+                 batch_size,
+                 height,
+                 width):
+        
+        device_id = hvd.local_rank()
+
+        daliop = dali_tf.DALIIterator()
+
+        with tf.device("/gpu:0"):
+            self.images, self.labels = daliop(
+                pipeline=pipe,
+                shapes=[(batch_size, height, width, 3), (batch_size, 1)],
+                dtypes=[tf.float32, tf.int32],
+                device_id=device_id)
+
+    def get_device_minibatches(self):
+        with tf.device("/gpu:0"):
+            self.labels -= 1 # Change to 0-based (don't use background class)
+            #self.labels = tf.squeeze(self.labels)
+        return self.images, self.labels
 
 
 def input_fn(is_training, data_dir, batch_size, num_epochs=1, num_gpus=None,
@@ -165,27 +413,21 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1, num_gpus=None,
     A dataset that can be used for iteration.
   """
   mlperf_log.resnet_print(key=mlperf_log.INPUT_ORDER)
-  filenames = get_filenames(is_training, data_dir)
-  dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
-  if is_training:
-    # Shuffle the input files
-    dataset = dataset.shuffle(buffer_size=_NUM_TRAIN_FILES)
+  data_train = '/data/train100k.rec'
+  data_train_idx = '/data/train100k.idx'
+  data_val = '/data/val.rec'
+  data_val_idx = '/data/val.idx'   
+    
+  pipeline = build_input_pipeline(
+        data_train, data_train_idx, data_val, data_val_idx,
+        batch_size=batch_size, target_shape=(224,224, 3), seed=1, is_training=is_training)
+    
+  preprocessor = DALIPreprocessor(pipeline, batch_size, 224, 224)
 
-  # Convert to individual records
-  dataset = dataset.flat_map(tf.data.TFRecordDataset)
-
-  return resnet_run_loop.process_record_dataset(
-      dataset=dataset,
-      is_training=is_training,
-      batch_size=batch_size,
-      shuffle_buffer=_SHUFFLE_BUFFER,
-      parse_record_fn=parse_record,
-      num_epochs=num_epochs,
-      num_gpus=num_gpus,
-      examples_per_epoch=_NUM_IMAGES['train'] if is_training else None,
-      dtype=dtype
-  )
+  images, labels = preprocessor.get_device_minibatches()
+  
+  return (images, labels)
 
 
 def get_synth_input_fn():

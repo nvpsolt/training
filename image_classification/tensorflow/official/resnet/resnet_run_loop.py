@@ -25,6 +25,7 @@ from __future__ import print_function
 
 import argparse
 import os
+import sys 
 
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 
@@ -384,21 +385,22 @@ def resnet_model_fn(features, labels, mode, model_class,
   else:
     train_op = None
 
+  labels = tf.squeeze(labels, name='labels_ref')
+
   accuracy = tf.metrics.accuracy(labels, predictions['classes'])
-  accuracy_top_5 = tf.metrics.mean(tf.nn.in_top_k(predictions=logits,
-                                                  targets=labels,
-                                                  k=5,
-                                                  name='top_5_op'))
+  #accuracy_top_5 = tf.metrics.mean(tf.nn.in_top_k(predictions=logits,
+                                                  #targets=labels,
+                                                  #k=5,
+                                                  #name='top_5_op'))
 
   metrics = {'accuracy': accuracy,
-             'accuracy_top_5': accuracy_top_5,
              _NUM_EXAMPLES_NAME: num_examples_metric}
 
   # Create a tensor named train_accuracy for logging purposes
   tf.identity(accuracy[1], name='train_accuracy')
-  tf.identity(accuracy_top_5[1], name='train_accuracy_top_5')
+  #tf.identity(accuracy_top_5[1], name='train_accuracy_top_5')
   tf.summary.scalar('train_accuracy', accuracy[1])
-  tf.summary.scalar('train_accuracy_top_5', accuracy_top_5[1])
+  #tf.summary.scalar('train_accuracy_top_5', accuracy_top_5[1])
 
   return tf.estimator.EstimatorSpec(
       mode=mode,
@@ -439,6 +441,23 @@ def per_device_batch_size(batch_size, num_gpus):
   return int(batch_size / num_gpus)
 
 
+class PrintHook(tf.train.SessionRunHook):
+    def before_run(self, run_context):
+
+        run_args = tf.train.SessionRunArgs(
+            fetches=[
+                'labels_ref:0'
+            ]
+        )
+
+        return run_args
+
+    def after_run(self, run_context, run_values):
+        labels = run_values.results
+        print(labels)
+
+
+
 def resnet_main(seed, flags, model_function, input_function, shape=None):
   """Shared main loop for ResNet Models.
 
@@ -463,12 +482,16 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   # intra_op_parallelism_threads. Note that we default to having
   # allow_soft_placement = True, which is required for multi-GPU and not
   # harmful for other modes.
-  session_config = tf.ConfigProto(allow_soft_placement=True)
+  gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.5)  
+  gpu_options.allow_growth = False
+  session_config = tf.ConfigProto(gpu_options=gpu_options, allow_soft_placement=True)
+    
   session_config.gpu_options.visible_device_list = str(hvd.local_rank())
   session_config.gpu_options.force_gpu_compatible = True 
   session_config.intra_op_parallelism_threads = flags.inter_op_parallelism_threads
   session_config.inter_op_parallelism_threads = flags.intra_op_parallelism_threads
- 
+  
+  '''
   if flags.num_gpus == 0:
     distribution = tf.contrib.distribute.OneDeviceStrategy('device:CPU:0')
   elif flags.num_gpus == 1:
@@ -477,10 +500,10 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
     distribution = tf.contrib.distribute.MirroredStrategy(
         num_gpus=flags.num_gpus
     )
+  '''
 
   mlperf_log.resnet_print(key=mlperf_log.RUN_SET_RANDOM_SEED, value=seed)
-  run_config = tf.estimator.RunConfig(train_distribute=distribution,
-                                      session_config=session_config,
+  run_config = tf.estimator.RunConfig(session_config=session_config,
                                       save_checkpoints_secs = 45*60, 
                                       tf_random_seed=seed)
 
@@ -538,6 +561,8 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
       batch_size=flags.batch_size * hvd.size(),
       benchmark_log_dir=flags.benchmark_log_dir)
 
+    train_hooks = train_hooks + [PrintHook()]
+    
     _log_cache = []
     def formatter(x):
       """Abuse side effects to get tensors out of the model_fn."""
