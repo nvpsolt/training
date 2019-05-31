@@ -331,7 +331,7 @@ def build_input_pipeline(
                                   device_id       = hvd.local_rank(),
                                   rec_path       = data_paths["train_data_tmp"],
                                   idx_path       = data_paths["train_idx_tmp"],
-                                  shard_id        = hvd.local_rank(),
+                                  shard_id        = hvd.rank(),
                                   num_shards      = hvd.size(),
                                   crop_shape      = target_shape[:-1],
                                   min_random_area = 0.05,

@@ -488,7 +488,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   # intra_op_parallelism_threads. Note that we default to having
   # allow_soft_placement = True, which is required for multi-GPU and not
   # harmful for other modes.
-  gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.5)  
+  gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.45)  
   gpu_options.allow_growth = False
   session_config = tf.ConfigProto(gpu_options=gpu_options, allow_soft_placement=True)
     
