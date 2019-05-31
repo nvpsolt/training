@@ -196,9 +196,12 @@ def learning_rate_with_decay(
     elif batch_size < 32768:
       plr = 25.0
       w_epochs = 5
-    else:
+    elif batch_size < 49152:
       plr = 32.0
       w_epochs = 14
+    else:
+      plr = 40.7
+      w_epochs = 33
 
     w_steps = int(w_epochs * batches_per_epoch)
     wrate = (plr * tf.cast(global_step, tf.float32) / tf.cast(
