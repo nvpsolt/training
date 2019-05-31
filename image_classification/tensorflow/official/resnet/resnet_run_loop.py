@@ -562,7 +562,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
       batch_size=flags.batch_size * hvd.size(),
       benchmark_log_dir=flags.benchmark_log_dir)
 
-    train_hooks = train_hooks + [PrintHook()]
+    #train_hooks = train_hooks + [PrintHook()]
     
     _log_cache = []
     def formatter(x):

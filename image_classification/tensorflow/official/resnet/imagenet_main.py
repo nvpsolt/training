@@ -391,9 +391,6 @@ class DALIPreprocessor(object):
                 device_id=device_id)
 
     def get_device_minibatches(self):
-        with tf.device("/gpu:0"):
-            self.labels -= 1 # Change to 0-based (don't use background class)
-            #self.labels = tf.squeeze(self.labels)
         return self.images, tf.cast(self.labels, tf.int64)
 
 
