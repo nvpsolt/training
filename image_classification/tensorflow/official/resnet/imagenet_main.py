@@ -411,8 +411,8 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1, num_gpus=None,
   """
   mlperf_log.resnet_print(key=mlperf_log.INPUT_ORDER)
 
-  data_train = '/data/train100k.rec'
-  data_train_idx = '/data/train100k.idx'
+  data_train = '/data/train.rec'
+  data_train_idx = '/data/train.idx'
   data_val = '/data/val.rec'
   data_val_idx = '/data/val.idx'   
     

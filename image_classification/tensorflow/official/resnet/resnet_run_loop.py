@@ -197,10 +197,13 @@ def learning_rate_with_decay(
     elif batch_size < 32768:
       plr = 25.0
       w_epochs = 5
-    else:
+    elif batch_size < 49152:
       plr = 32.0
       w_epochs = 14
-
+    else:
+      plr = 40.7
+      w_epochs = 33
+        
     w_steps = int(w_epochs * batches_per_epoch)
     wrate = (plr * tf.cast(global_step, tf.float32) / tf.cast(
         w_steps, tf.float32))
@@ -272,7 +275,7 @@ def resnet_model_fn(features, labels, mode, model_class,
   tf.summary.image('images', features, max_outputs=6)
 
   # Checks that features/images have same data type being used for calculations.
-  assert features.dtype == dtype
+  #assert features.dtype == dtype
 
   features = tf.cast(features, dtype)
 
@@ -280,6 +283,9 @@ def resnet_model_fn(features, labels, mode, model_class,
 
   logits = model(features, mode == tf.estimator.ModeKeys.TRAIN)
 
+  labels = tf.squeeze(labels, name='labels_ref')
+
+    
   # This acts as a no-op if the logits are already in fp32 (provided logits are
   # not a SparseTensor). If dtype is is low precision, logits must be cast to
   # fp32 for numerical stability.
@@ -375,7 +381,7 @@ def resnet_model_fn(features, labels, mode, model_class,
       # Once the gradient computation is complete we can scale the gradients
       # back to the correct scale before passing them to the optimizer.
       unscaled_grad_vars = [(grad / loss_scale, var)
-                            for grad, var in scaled_grad_vars]
+                            for grad, var in scaled_grad_vars if grad is not None]
       minimize_op = optimizer.apply_gradients(unscaled_grad_vars, global_step)
     else:
       minimize_op = optimizer.minimize(loss, global_step)
@@ -385,7 +391,6 @@ def resnet_model_fn(features, labels, mode, model_class,
   else:
     train_op = None
 
-  labels = tf.squeeze(labels, name='labels_ref')
 
   accuracy = tf.metrics.accuracy(labels, predictions['classes'])
   accuracy_top_5 = tf.metrics.mean(tf.nn.in_top_k(predictions=logits,
