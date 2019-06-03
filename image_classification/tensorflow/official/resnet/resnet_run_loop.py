@@ -28,6 +28,11 @@ import os
 
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import linalg_ops
+from tensorflow.python.ops import math_ops
+from tensorflow.python.training import training_ops
+
 from mlperf_compliance import mlperf_log
 from mlperf_compliance import tf_mlperf_log
 from official.resnet import resnet_model
@@ -45,6 +50,49 @@ _NUM_IMAGES = {
     'train': 1281167,
     'validation': 50000,
 }
+
+
+class LARSOptimizer_separate(tf.contrib.opt.LARSOptimizer):
+  def _apply_dense(self, grad, var):
+    scaled_lr = self.compute_lr(grad, var)
+    mom = self.get_slot(var, "momentum")
+    return training_ops.apply_momentum(
+        var, 
+        mom,  
+        1.0, 
+        grad*scaled_lr, 
+        self._momentum,  
+        use_locking=False, 
+        use_nesterov=self._use_nesterov)
+
+  def _resource_apply_dense(self, grad, var):
+    scaled_lr = self.compute_lr(grad, var)
+    mom = self.get_slot(var, "momentum")
+    return training_ops.resource_apply_momentum(
+        var.handle, 
+        mom.handle,  
+        1.0, 
+        grad*scaled_lr, 
+        self._momentum, 
+        use_locking=False, 
+        use_nesterov=self._use_nesterov)
+
+  def compute_lr(self, grad, var):
+    scaled_lr = self._learning_rate
+    if self._skip_list is None or not any(v in var.name
+                                          for v in self._skip_list):
+      w_norm = linalg_ops.norm(var, ord=2)
+      g_norm = linalg_ops.norm(grad - self._weight_decay * var, ord=2)
+      trust_ratio = array_ops.where(
+          math_ops.greater(w_norm, 0),
+          array_ops.where(
+              math_ops.greater(g_norm, 0),
+              (self._eeta * w_norm /
+               (g_norm + self._weight_decay * w_norm + self._epsilon)), 1.0),
+          1.0)
+      scaled_lr = self._learning_rate * trust_ratio
+    return scaled_lr
+
 ################################################################################
 # Functions for input processing.
 ################################################################################
@@ -357,7 +405,7 @@ def resnet_model_fn(features, labels, mode, model_class,
     mlperf_log.resnet_print(key=mlperf_log.OPT_MOMENTUM, value=momentum)
 
     if enable_lars:
-      optimizer = tf.contrib.opt.LARSOptimizer(
+      optimizer = LARSOptimizer_separate(
           learning_rate,
           momentum=momentum,
           weight_decay=weight_decay,
