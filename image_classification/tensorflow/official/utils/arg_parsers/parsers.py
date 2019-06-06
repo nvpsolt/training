@@ -111,7 +111,8 @@ class BaseParser(argparse.ArgumentParser):
                train_epochs=True, epochs_between_evals=True,
                stop_threshold=True, batch_size=True,
                multi_gpu=False, num_gpu=True, hooks=True,
-               enable_lars=True, label_smoothing=True, weight_decay=True, fine_tune=True):
+               enable_lars=True, label_smoothing=True, weight_decay=True,
+               eval_offset=True, fine_tune=True):
     super(BaseParser, self).__init__(add_help=add_help)
 
     if data_dir:
@@ -142,6 +143,14 @@ class BaseParser(argparse.ArgumentParser):
           help="[default: %(default)s] The number of training epochs to run "
                "between evaluations.",
           metavar="<EBE>"
+      )
+    
+    if epochs_between_evals:
+      self.add_argument(
+          "--eval_offset", "-eo", type=int, default=70,
+          help="[default: %(default)s] The number of training epochs to run "
+               "befoure evaluating every N epochs.",
+          metavar="<EO>"
       )
 
     if stop_threshold:

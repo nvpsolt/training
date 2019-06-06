@@ -196,12 +196,18 @@ def learning_rate_with_decay(
     elif batch_size < 32768:
       plr = 25.0
       w_epochs = 5
-    elif batch_size < 49152:
-      plr = 32.0
-      w_epochs = 14
+    elif batch_size < 35000: #32K
+      plr = 25.0
+      w_epochs = 15
+    elif batch_size < 45000: #40K
+      plr = 30.0
+      w_epochs = 20
     else:
       plr = 40.7
       w_epochs = 33
+        
+    print('PLR', plr)
+    print('W_EPOCHS', w_epochs)
 
     w_steps = int(w_epochs * batches_per_epoch)
     wrate = (plr * tf.cast(global_step, tf.float32) / tf.cast(
@@ -471,20 +477,10 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   session_config.gpu_options.force_gpu_compatible = True 
   session_config.intra_op_parallelism_threads = flags.inter_op_parallelism_threads
   session_config.inter_op_parallelism_threads = flags.intra_op_parallelism_threads
- 
-  if flags.num_gpus == 0:
-    distribution = tf.contrib.distribute.OneDeviceStrategy('device:CPU:0')
-  elif flags.num_gpus == 1:
-    distribution = tf.contrib.distribute.OneDeviceStrategy('device:GPU:0')
-  else:
-    distribution = tf.contrib.distribute.MirroredStrategy(
-        num_gpus=flags.num_gpus
-    )
 
   mlperf_log.resnet_print(key=mlperf_log.RUN_SET_RANDOM_SEED, value=seed)
-  run_config = tf.estimator.RunConfig(train_distribute=distribution,
-                                      session_config=session_config,
-                                      save_checkpoints_secs = 45*60, 
+  run_config = tf.estimator.RunConfig(session_config=session_config,
+                                      save_checkpoints_secs = 120*60, 
                                       tf_random_seed=seed)
 
   mlperf_log.resnet_print(key=mlperf_log.INPUT_BATCH_SIZE,
@@ -520,12 +516,55 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   steps_per_epoch = _NUM_IMAGES['train'] // flags.batch_size
   steps_per_epoch_per_worker = steps_per_epoch // hvd.size()
   steps_per_eval_per_worker = steps_per_epoch_per_worker * flags.epochs_between_evals
+  steps_per_eval_offset = steps_per_epoch_per_worker * flags.eval_offset
+
 
   # The reference performs the first evaluation on the fourth epoch. (offset
   # eval by 3 epochs)
   mlperf_log.resnet_print(key=mlperf_log.EVAL_EPOCH_OFFSET, value=3)
   success = False
-  for i in range(flags.train_epochs // flags.epochs_between_evals):
+
+  # Train for 'eval_offset' epochs
+  train_hooks = [hvd.BroadcastGlobalVariablesHook(0)] 
+    
+  train_hooks = train_hooks + hooks_helper.get_train_hooks(
+    flags.hooks,
+    batch_size=flags.batch_size * hvd.size(),
+    benchmark_log_dir=flags.benchmark_log_dir)
+
+  _log_cache = []
+  def formatter(x):
+    """Abuse side effects to get tensors out of the model_fn."""
+    if _log_cache:
+      _log_cache.pop()
+    _log_cache.append(x.copy())
+    return str(x)
+
+  compliance_hook = tf.train.LoggingTensorHook(
+    tensors={_NUM_EXAMPLES_NAME: _NUM_EXAMPLES_NAME},
+    every_n_iter=int(1e10),
+    at_end=True,
+    formatter=formatter)
+
+  train_hooks = train_hooks + [compliance_hook]
+  print('Training for ', flags.eval_offset, ' epochs')
+
+  def input_fn_train():
+    return input_function(
+        is_training=True,
+        data_dir=flags.data_dir,
+        batch_size=per_device_batch_size(flags.batch_size, flags.num_gpus),
+        num_epochs=flags.eval_offset,
+        num_gpus=flags.num_gpus,
+        dtype=flags.dtype
+    )
+
+  classifier.train(input_fn=input_fn_train, hooks=train_hooks,
+                    steps=steps_per_eval_offset)
+
+    
+  evaluated_epochs = flags.train_epochs - flags.eval_offset
+  for i in range(evaluated_epochs // flags.epochs_between_evals):
     # Data for epochs_between_evals (i.e. 4 epochs between evals) worth of
     # epochs is concatenated and run as a single block inside a session. For
     # this reason we declare all of the epochs that will be run at the start.
